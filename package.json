@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "debug": "node debug-fazenda.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": ["SAT", "consulta", "playwright", "anticaptcha", "api", "fiscal"],
