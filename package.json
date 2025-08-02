@@ -1,0 +1,20 @@
+{
+  "name": "consulta-sat-api",
+  "version": "1.0.0",
+  "description": "API para consultar SAT da Fazenda-SP com resolução automática de reCAPTCHA",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["SAT", "consulta", "playwright", "anticaptcha", "api", "fiscal"],
+  "author": "Deyvis Ferreira",
+  "license": "ISC",
+  "dependencies": {
+    "@antiadmin/anticaptchaofficial": "^1.0.53",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "playwright": "^1.54.1"
+  }
+}
