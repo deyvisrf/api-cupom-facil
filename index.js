@@ -10,7 +10,10 @@ app.use(cors());
 app.post('/consulta', async (req, res) => {
   const { chaveAcesso } = req.body;
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox']
+  });
   const page = await browser.newPage();
 
   try {
