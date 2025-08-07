@@ -16,7 +16,7 @@ app.post('/consulta', async (req, res) => {
 
   // 🚀 Produção: headless + no-sandbox
   const browser = await chromium.launch({
-    headless: true,
+    headless: false,
     args: ['--no-sandbox']
   });
   const page = await browser.newPage();
@@ -53,13 +53,15 @@ app.post('/consulta', async (req, res) => {
 
     await page.click('#conteudo_btnConsultar');
 
+    await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
+
     // 4) Espera o conteúdo da nota aparecer (seletor robusto)
-    try {
-      await page.waitForSelector('#conteudo', { timeout: 20_000 });
-    } catch {
-      // fallback por texto
-      await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
-    }
+    // try {
+    //   await page.waitForSelector('#conteudo', { timeout: 20_000 });
+    // } catch {
+    //   // fallback por texto
+    //   await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
+    // }
 
     // 5) Extrai somente a div da nota para exibição + performance
     let notaHtml;
