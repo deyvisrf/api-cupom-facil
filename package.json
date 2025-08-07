@@ -8,11 +8,19 @@
     "debug": "node debug-fazenda.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["SAT", "consulta", "playwright", "anticaptcha", "api", "fiscal"],
+  "keywords": [
+    "SAT",
+    "consulta",
+    "playwright",
+    "anticaptcha",
+    "api",
+    "fiscal"
+  ],
   "author": "Deyvis Ferreira",
   "license": "ISC",
   "dependencies": {
     "@antiadmin/anticaptchaofficial": "^1.0.53",
+    "axios": "^1.11.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
