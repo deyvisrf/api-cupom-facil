@@ -11,7 +11,7 @@ app.post('/consulta', async (req, res) => {
   const { chaveAcesso } = req.body;
 
   const browser = await chromium.launch({
-    headless: false,
+    headless: true,
     args: ['--no-sandbox']
   });
   const page = await browser.newPage();
@@ -58,4 +58,4 @@ app.post('/consulta', async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log('🚀 Endpoint rodando em http://localhost:3000'));
+app.listen(3000, () => console.log('🚀 Endpoint rodando em Produção'));
