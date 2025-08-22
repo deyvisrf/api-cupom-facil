@@ -140,31 +140,59 @@ app.post('/consulta', async (req, res) => {
         await page.fill('#conteudo_txtChaveAcesso', chaveAcesso);
 
         // 🚀 PEGA TOKEN DO POOL (< 1s)
+        console.log('🎯 Obtendo token do pool...');
         const captchaToken = await tokenPool.getToken();
+        console.log('✅ Token obtido, injetando...');
+        
         await page.evaluate((token) => {
           const el = document.querySelector('[name="g-recaptcha-response"]');
           if (el) el.value = token;
+          console.log('Token injetado:', !!token);
         }, captchaToken);
 
-        // envia
+        // verifica e clica botão
+        console.log('🔍 Verificando botão consultar...');
+        const btnExists = await page.$('#conteudo_btnConsultar');
+        if (!btnExists) {
+          throw new Error('Botão #conteudo_btnConsultar não encontrado');
+        }
+        
+        console.log('✅ Botão encontrado, habilitando e clicando...');
         await page.evaluate(() => {
           const btn = document.querySelector('#conteudo_btnConsultar');
-          if (btn) btn.disabled = false;
+          if (btn) {
+            btn.disabled = false;
+            console.log('Botão habilitado:', !btn.disabled);
+          }
         });
+        
         await page.click('#conteudo_btnConsultar');
+        console.log('✅ Clique executado, aguardando resposta...');
 
-        // espera conteúdo
-        try {
-          await page.waitForSelector('#conteudo', { timeout: 30_000 });
-        } catch {
-          await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 30_000 });
-        }
+        // 🎯 DETECÇÃO RÁPIDA: só verifica se apareceu
+        console.log('⏳ Verificando se cupom apareceu...');
+        let notaHtml = '';
 
-        // extrai HTML
-        let notaHtml;
         try {
-          notaHtml = await page.$eval('#conteudo', el => el.outerHTML);
-        } catch {
+          // Aguarda qualquer indicador de sucesso (mais rápido)
+          await Promise.race([
+            page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 15_000 }),
+            page.waitForSelector('#conteudo', { timeout: 15_000 }),
+            page.waitForSelector('text=NOTA FISCAL', { timeout: 15_000 })
+          ]);
+          
+          console.log('✅ Cupom detectado! Extraindo HTML rapidamente...');
+          
+          // Extração rápida com timeout curto
+          try {
+            notaHtml = await page.$eval('#conteudo', el => el.outerHTML);
+          } catch {
+            // Fallback: pega só o body se #conteudo falhar
+            notaHtml = await page.$eval('body', el => el.innerHTML);
+          }
+          
+        } catch (e) {
+          console.log('⚠️ Cupom não detectado no tempo esperado, extraindo página atual...');
           notaHtml = await page.content();
         }
 
