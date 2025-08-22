@@ -9,7 +9,7 @@ app.use(express.json());
 app.use(cors());
 
 // --- Config ---
-const ROUTE_TIMEOUT_MS = 45_000;  // Reduzido: sem espera de captcha (15-45s)
+const ROUTE_TIMEOUT_MS = 90_000;  // Reduzido: sem espera de captcha (15-45s)
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 1);
 const GOTO_TIMEOUT = 90_000;
 
