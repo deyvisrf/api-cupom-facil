@@ -154,7 +154,6 @@ app.post('/consulta', async (req, res) => {
           await page.waitForSelector('#conteudo', { timeout: 90_000 });
         } catch {
           await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 90_000 });
-          await page.waitForSelector('text=Desconto:', { timeout: 90_000 });
         }
 
         // extrai HTML
