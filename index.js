@@ -1,6 +1,7 @@
 const express = require('express');
 const { chromium } = require('playwright');
 const resolverRecaptcha = require('./resolverCaptcha');
+const tokenPool = require('./tokenPool');
 const cors = require('cors');
 
 const app = express();
@@ -8,7 +9,7 @@ app.use(express.json());
 app.use(cors());
 
 // --- Config ---
-const ROUTE_TIMEOUT_MS = 120_000;  // 2min - folga para captcha paralelo + fila
+const ROUTE_TIMEOUT_MS = 70_000;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 1);
 const GOTO_TIMEOUT = 90_000;
 
@@ -99,15 +100,15 @@ async function newContext() {
 // healthcheck
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// 📊 Endpoint para estatísticas do pool
+app.get('/pool-stats', (_req, res) => res.json(tokenPool.getStats()));
+
 app.post('/consulta', async (req, res) => {
   res.setTimeout(ROUTE_TIMEOUT_MS);
   const { chaveAcesso } = req.body;
 
   try {
     const result = await enqueue(async () => {
-      // 🚀 INICIA CAPTCHA IMEDIATAMENTE (em paralelo)
-      const captchaPromise = resolverRecaptcha();
-      
       const context = await newContext();
       const page = await context.newPage();
 
@@ -138,11 +139,8 @@ app.post('/consulta', async (req, res) => {
         await page.$eval('#__EVENTVALIDATION', el => el.value);
         await page.fill('#conteudo_txtChaveAcesso', chaveAcesso);
 
-        // 🎯 AGUARDA CAPTCHA (já deve estar pronto ou quase)
-        console.log('⏳ Aguardando resolução do captcha...');
-        const captchaToken = await captchaPromise;
-        console.log('✅ Captcha resolvido, injetando token...');
-        
+        // 🚀 PEGA TOKEN DO POOL (< 1s)
+        const captchaToken = await tokenPool.getToken();
         await page.evaluate((token) => {
           const el = document.querySelector('[name="g-recaptcha-response"]');
           if (el) el.value = token;
@@ -157,9 +155,9 @@ app.post('/consulta', async (req, res) => {
 
         // espera conteúdo
         try {
-          await page.waitForSelector('#conteudo', { timeout: 20_000 });
+          await page.waitForSelector('#conteudo', { timeout: 90_000 });
         } catch {
-          await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
+          await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 90_000 });
         }
 
         // extrai HTML

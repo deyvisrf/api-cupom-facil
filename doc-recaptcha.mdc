@@ -1,0 +1,15 @@
+Como melhorar a velocidade de resolução do Recaptcha de 60 segundos para 1 segundo
+
+Cada tarefa do Recaptcha tem dois parâmetros principais: 'sitekey' (chave do site) e domínio. O sitekey é uma sequência que o administrador do site recebe ao se registrar no Google. Ele nunca muda, então seu bot só precisa capturá-lo uma vez e armazená-lo para uso futuro. Isso é tudo o que é necessário para gerar um token do Recaptcha.
+Exemplo de 'Sitekey' para google.com: "6LfwuyUTAAAAAOAmoS0fdqijC2PbbdH4kjq62Y1b". Permanece inalterado desde sempre!
+
+Cada token Recaptcha é uma string de 50-2000 bytes válida por 120 segundos após a resolução da tarefa. O que oferece um tempo suficiente para para automatizar na web. Armazene seus tokens em um banco de dados temporário que os exclua automaticamente após 110-120 segundos.
+
+Para um desempenho eficiente da sua tarefa, recomendamos resolver o Recaptcha em processos paralelos e armazenar os tokens resultantes em um banco de dados dedicado.
+
+Quando precisar de um token, selecione apenas o mais antigo do banco de dados e remova-o.
+
+Desta forma, você estará resolvendo o Recaptcha com antecedência e pode fornecer um token ao seu bot quando necessário. As consultas ao banco de dados levam menos de um segundo.
+
+O titular do website nunca saberá que o token foi resolvido. O Google não fornece essa informação na sua API.
+Se você quer que seus captchas sejam resolvidos rapidamente, envie esta instrução para o desenvolvedor do seu aplicativo.
