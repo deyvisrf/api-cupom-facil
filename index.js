@@ -8,7 +8,7 @@ app.use(express.json());
 app.use(cors());
 
 // --- Config ---
-const ROUTE_TIMEOUT_MS = 70_000;
+const ROUTE_TIMEOUT_MS = 120_000;  // 2min - folga para captcha paralelo + fila
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 1);
 const GOTO_TIMEOUT = 90_000;
 
@@ -105,6 +105,9 @@ app.post('/consulta', async (req, res) => {
 
   try {
     const result = await enqueue(async () => {
+      // 🚀 INICIA CAPTCHA IMEDIATAMENTE (em paralelo)
+      const captchaPromise = resolverRecaptcha();
+      
       const context = await newContext();
       const page = await context.newPage();
 
@@ -135,8 +138,11 @@ app.post('/consulta', async (req, res) => {
         await page.$eval('#__EVENTVALIDATION', el => el.value);
         await page.fill('#conteudo_txtChaveAcesso', chaveAcesso);
 
-        // resolve captcha
-        const captchaToken = await resolverRecaptcha();
+        // 🎯 AGUARDA CAPTCHA (já deve estar pronto ou quase)
+        console.log('⏳ Aguardando resolução do captcha...');
+        const captchaToken = await captchaPromise;
+        console.log('✅ Captcha resolvido, injetando token...');
+        
         await page.evaluate((token) => {
           const el = document.querySelector('[name="g-recaptcha-response"]');
           if (el) el.value = token;
