@@ -1,6 +1,6 @@
 const express = require('express');
 const { chromium } = require('playwright');
-const resolverRecaptcha = require('./resolverCaptcha');
+// const resolverRecaptcha = require('./resolverCaptcha'); // Não usado mais diretamente
 const tokenPool = require('./tokenPool');
 const cors = require('cors');
 
@@ -9,7 +9,7 @@ app.use(express.json());
 app.use(cors());
 
 // --- Config ---
-const ROUTE_TIMEOUT_MS = 70_000;
+const ROUTE_TIMEOUT_MS = 45_000;  // Reduzido: sem espera de captcha (15-45s)
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 1);
 const GOTO_TIMEOUT = 90_000;
 
@@ -155,9 +155,9 @@ app.post('/consulta', async (req, res) => {
 
         // espera conteúdo
         try {
-          await page.waitForSelector('#conteudo', { timeout: 90_000 });
+          await page.waitForSelector('#conteudo', { timeout: 30_000 });
         } catch {
-          await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 90_000 });
+          await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 30_000 });
         }
 
         // extrai HTML
