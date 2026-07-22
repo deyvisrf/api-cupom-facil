@@ -7,21 +7,49 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-//⏱️ timeout de resposta da rota (evita requests penduradas)
-const ROUTE_TIMEOUT_MS = 70_000;
+//⏱️ timeout de resposta da rota (evita requests penduradas), com folga para captcha lento
+const ROUTE_TIMEOUT_MS = 120_000;
+//⏱️ limite máximo de espera pela resolução do captcha (a lib do Anti-Captcha não tem timeout interno)
+const CAPTCHA_TIMEOUT_MS = 90_000;
+//🔒 número máximo de consultas simultâneas (evita retries gastarem captcha duplicado)
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT) || 1;
+let emAndamento = 0;
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 app.post('/consulta', async (req, res) => {
-  res.setTimeout(ROUTE_TIMEOUT_MS);
+  if (emAndamento >= MAX_CONCURRENT) {
+    return res.status(429).json({ error: 'Já existe uma consulta em andamento. Tente novamente em instantes.' });
+  }
+  emAndamento++;
+
+  let respondido = false;
+  res.setTimeout(ROUTE_TIMEOUT_MS, () => {
+    if (respondido) return;
+    respondido = true;
+    console.error('⏱️ Timeout da rota /consulta atingido.');
+    res.status(504).json({ error: 'Tempo excedido ao consultar o SAT. Tente novamente.' });
+  });
+
   const { chaveAcesso } = req.body;
 
-  // 🚀 Produção: headless + no-sandbox
-  const browser = await chromium.launch({ 
-    headless: true, 
-    args: ['--no-sandbox','--disable-dev-shm-usage'] 
-  });
-  const page = await browser.newPage();
+  let browser;
+  let page;
 
   try {
+    // 🚀 Produção: headless + no-sandbox
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox','--disable-dev-shm-usage']
+    });
+    page = await browser.newPage();
+
     // 1) Abre página e já começa a preparar o formulário
     await page.goto('https://satsp.fazenda.sp.gov.br/COMSAT/Public/ConsultaPublica/ConsultaPublicaCfe.aspx', {
       timeout: 30_000,
@@ -37,8 +65,12 @@ app.post('/consulta', async (req, res) => {
     // 2) Dispara a resolução do captcha em paralelo (overlap)
     const captchaPromise = resolverRecaptcha();
 
-    // 3) Quando realmente precisar, aguarda o token
-    const captchaToken = await captchaPromise;
+    // 3) Quando realmente precisar, aguarda o token (com limite máximo)
+    const captchaToken = await withTimeout(
+      captchaPromise,
+      CAPTCHA_TIMEOUT_MS,
+      'Tempo excedido ao resolver o reCAPTCHA.'
+    );
 
     await page.evaluate((token) => {
       const el = document.querySelector('[name="g-recaptcha-response"]');
@@ -53,15 +85,17 @@ app.post('/consulta', async (req, res) => {
 
     await page.click('#conteudo_btnConsultar');
 
-    await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
-
-    // 4) Espera o conteúdo da nota aparecer (seletor robusto)
-    // try {
-    //   await page.waitForSelector('#conteudo', { timeout: 20_000 });
-    // } catch {
-    //   // fallback por texto
-    //   await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
-    // }
+    try {
+      await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
+    } catch (waitError) {
+      // Diagnóstico: o site pode ter rejeitado o token, mostrado a chave como inválida,
+      // ou apresentado um bloqueio — loga o que realmente foi renderizado para investigar depois.
+      try {
+        const textoPagina = await page.evaluate(() => document.body?.innerText?.slice(0, 1000));
+        console.error('❌ Cupom não encontrado após submit. Conteúdo da página:', textoPagina);
+      } catch {}
+      throw waitError;
+    }
 
     // 5) Extrai somente a div da nota para exibição + performance
     let notaHtml;
@@ -72,13 +106,20 @@ app.post('/consulta', async (req, res) => {
       notaHtml = await page.content();
     }
 
-    res.json({ status: 'ok', notaHtml });
+    if (!respondido) {
+      respondido = true;
+      res.json({ status: 'ok', notaHtml });
+    }
   } catch (error) {
     console.error('Erro /consulta:', error);
-    res.status(500).json({ error: 'Erro ao consultar SAT.' });
+    if (!respondido) {
+      respondido = true;
+      res.status(500).json({ error: 'Erro ao consultar SAT.' });
+    }
   } finally {
-    try { await page.close(); } catch {}
-    await browser.close();
+    emAndamento--;
+    try { if (page) await page.close(); } catch {}
+    try { if (browser) await browser.close(); } catch {}
   }
 });
 
