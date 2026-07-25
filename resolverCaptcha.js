@@ -5,6 +5,10 @@ const rawKey = process.env.ANTI_CAPTCHA_KEY || '';
 const chaveMascarada = rawKey ? `${'*'.repeat(Math.max(rawKey.length - 4, 0))}${rawKey.slice(-4)}` : '(vazia)';
 console.log(`🔑 ANTI_CAPTCHA_KEY carregada: ${chaveMascarada} (tamanho: ${rawKey.length})`);
 
+// 🔍 diagnóstico temporário: lista nomes de variáveis parecidas (detecta espaço/caractere oculto no nome)
+const chavesParecidas = Object.keys(process.env).filter((k) => /ANTI|CAPTCHA|MAX_CONCUR|NODE_ENV/i.test(k));
+console.log('🔍 Variáveis de ambiente encontradas com nomes parecidos:', JSON.stringify(chavesParecidas));
+
 anticaptcha.setAPIKey(rawKey);
 
 // backoff “adulto”: espera inicial maior, depois polling moderado até 60s
