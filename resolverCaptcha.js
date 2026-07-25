@@ -1,7 +1,11 @@
 require('dotenv').config();
 const anticaptcha = require('@antiadmin/anticaptchaofficial');
 
-anticaptcha.setAPIKey(process.env.ANTI_CAPTCHA_KEY);
+const rawKey = process.env.ANTI_CAPTCHA_KEY || '';
+const chaveMascarada = rawKey ? `${'*'.repeat(Math.max(rawKey.length - 4, 0))}${rawKey.slice(-4)}` : '(vazia)';
+console.log(`🔑 ANTI_CAPTCHA_KEY carregada: ${chaveMascarada} (tamanho: ${rawKey.length})`);
+
+anticaptcha.setAPIKey(rawKey);
 
 // backoff “adulto”: espera inicial maior, depois polling moderado até 60s
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
