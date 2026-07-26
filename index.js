@@ -7,12 +7,17 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-//⏱️ timeout de resposta da rota (evita requests penduradas), com folga para captcha lento
-const ROUTE_TIMEOUT_MS = 120_000;
-//⏱️ limite máximo de espera pela resolução do captcha (a lib do Anti-Captcha não tem timeout interno)
-const CAPTCHA_TIMEOUT_MS = 90_000;
-//🔒 número máximo de consultas simultâneas (evita retries gastarem captcha duplicado)
-const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT) || 1;
+// ⏱️ Orçamento de tempo, do mais interno para o mais externo:
+//   captcha (120s) + carregamento da página (~10s) + submit/extração (~20s) = ~150s < rota (160s) < frontend (180s)
+// Cada camada precisa de folga sobre a de dentro, senão o erro que chega ao usuário é o genérico
+// da camada externa em vez da causa real.
+const ROUTE_TIMEOUT_MS = 160_000;
+//⏱️ limite máximo de espera pela resolução do captcha (a lib do Anti-Captcha não tem timeout interno).
+// 90s era curto: em horário de fila o Anti-Captcha passa disso e a consulta morria com 500.
+const CAPTCHA_TIMEOUT_MS = 120_000;
+//🔒 número máximo de consultas simultâneas (evita retries gastarem captcha duplicado).
+// Cada Chromium consome ~300-500MB: subir isso exige conferir a memória da instância.
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT) || 2;
 let emAndamento = 0;
 
 function withTimeout(promise, ms, message) {
@@ -30,22 +35,52 @@ app.post('/consulta', async (req, res) => {
   emAndamento++;
 
   let respondido = false;
+  let browser;
+  let page;
+  let abortado = false;
+  let slotLiberado = false;
+
+  // O contador tem que cair no momento do abort, não no fim da limpeza: a espera pelo captcha é
+  // uma promise comum que fechar o browser não cancela, e ela ainda pode levar minutos para
+  // se resolver. Guardado por flag para o finally não decrementar de novo.
+  const liberarSlot = () => {
+    if (slotLiberado) return;
+    slotLiberado = true;
+    emAndamento--;
+  };
+
+  // Encerra o Chromium e libera o slot para interromper a consulta órfã: sem isso MAX_CONCURRENT
+  // fica preso até o fim do scraping, mesmo sem ninguém para receber a resposta.
+  const abortarConsulta = (motivo) => {
+    abortado = true;
+    console.warn(`🔌 Consulta abortada: ${motivo}`);
+    liberarSlot();
+    if (browser) browser.close().catch(() => {});
+  };
+
   res.setTimeout(ROUTE_TIMEOUT_MS, () => {
     if (respondido) return;
     respondido = true;
     console.error('⏱️ Timeout da rota /consulta atingido.');
     res.status(504).json({ error: 'Tempo excedido ao consultar o SAT. Tente novamente.' });
+    abortarConsulta('timeout da rota');
+  });
+
+  // Cliente fechou a aba ou o fetch abortou antes da resposta.
+  // Precisa ser em `res`, não em `req`: o 'close' de `req` dispara assim que o body é lido.
+  // 'close' também ocorre no fim normal, por isso o writableFinished distingue os dois casos.
+  res.on('close', () => {
+    if (respondido || res.writableFinished) return;
+    respondido = true;
+    abortarConsulta('cliente desconectou');
   });
 
   const { chaveAcesso } = req.body;
 
-  let browser;
-  let page;
-
   try {
-    // 🚀 Produção: headless + no-sandbox
+    // 🚀 Produção: headless + no-sandbox. HEADLESS=false abre o navegador para depuração local.
     browser = await chromium.launch({
-      headless: true,
+      headless: process.env.HEADLESS !== 'false',
       args: ['--no-sandbox','--disable-dev-shm-usage']
     });
     page = await browser.newPage();
@@ -111,16 +146,23 @@ app.post('/consulta', async (req, res) => {
       res.json({ status: 'ok', notaHtml });
     }
   } catch (error) {
-    console.error('Erro /consulta:', error);
-    if (!respondido) {
-      respondido = true;
-      res.status(500).json({ error: 'Erro ao consultar SAT.' });
+    // Quando abortamos de propósito, o Playwright rejeita por browser fechado: não é falha real
+    if (abortado) {
+      console.warn('Consulta interrompida antes de concluir.');
+    } else {
+      console.error('Erro /consulta:', error);
+      if (!respondido) {
+        respondido = true;
+        res.status(500).json({ error: 'Erro ao consultar SAT.' });
+      }
     }
   } finally {
-    emAndamento--;
+    liberarSlot();
     try { if (page) await page.close(); } catch {}
     try { if (browser) await browser.close(); } catch {}
   }
 });
 
-app.listen(3000, () => console.log('🚀 Endpoint rodando com sucesso!'));
+// A plataforma de deploy injeta PORT; 3000 é só o padrão local
+const PORT = Number(process.env.PORT) || 3000;
+app.listen(PORT, () => console.log(`🚀 Endpoint rodando na porta ${PORT}!`));
