@@ -13,15 +13,16 @@ app.use(cors());
 // da camada externa em vez da causa real.
 const ROUTE_TIMEOUT_MS = 160_000;
 //⏱️ limite de espera pela resolução do captcha (a lib do Anti-Captcha não tem timeout interno).
-// Com retentativa, abandonar um token lento e pedir outro rende mais que esperar indefinidamente.
-const CAPTCHA_TIMEOUT_MS = Number(process.env.CAPTCHA_TIMEOUT_MS) || 60_000;
+// Medido em produção: token que demora costuma vir de worker degradado e ser recusado pela SEFAZ,
+// enquanto token rápido quase sempre passa. Cortar em 30s e pedir outro venceu 4/4 contra 1/4.
+const CAPTCHA_TIMEOUT_MS = Number(process.env.CAPTCHA_TIMEOUT_MS) || 30_000;
 //🔁 A SEFAZ recusa o token com frequência e, ao recusar, devolve a própria página de consulta
-// com HTTP 200. Retentar com token novo é o que sustenta a taxa de sucesso.
-const MAX_TENTATIVAS = Number(process.env.MAX_TENTATIVAS) || 3;
+// com HTTP 200. Ciclar tokens é o que sustenta a taxa de sucesso.
+const MAX_TENTATIVAS = Number(process.env.MAX_TENTATIVAS) || 5;
 // Folga reservada para conseguir responder antes de ROUTE_TIMEOUT_MS estourar
 const MARGEM_RESPOSTA_MS = 20_000;
 // Abaixo disso não cabe nem a tentativa mais rápida; melhor responder do que começar e ser cortado
-const TENTATIVA_MINIMA_MS = 35_000;
+const TENTATIVA_MINIMA_MS = 25_000;
 
 const URL_CONSULTA = 'https://satsp.fazenda.sp.gov.br/COMSAT/Public/ConsultaPublica/ConsultaPublicaCfe.aspx';
 // Discriminadores medidos em produção: a tabela de itens só existe no cupom, enquanto a página
