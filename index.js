@@ -12,9 +12,22 @@ app.use(cors());
 // Cada camada precisa de folga sobre a de dentro, senão o erro que chega ao usuário é o genérico
 // da camada externa em vez da causa real.
 const ROUTE_TIMEOUT_MS = 160_000;
-//⏱️ limite máximo de espera pela resolução do captcha (a lib do Anti-Captcha não tem timeout interno).
-// 90s era curto: em horário de fila o Anti-Captcha passa disso e a consulta morria com 500.
-const CAPTCHA_TIMEOUT_MS = 120_000;
+//⏱️ limite de espera pela resolução do captcha (a lib do Anti-Captcha não tem timeout interno).
+// Com retentativa, abandonar um token lento e pedir outro rende mais que esperar indefinidamente.
+const CAPTCHA_TIMEOUT_MS = Number(process.env.CAPTCHA_TIMEOUT_MS) || 60_000;
+//🔁 A SEFAZ recusa o token com frequência e, ao recusar, devolve a própria página de consulta
+// com HTTP 200. Retentar com token novo é o que sustenta a taxa de sucesso.
+const MAX_TENTATIVAS = Number(process.env.MAX_TENTATIVAS) || 3;
+// Folga reservada para conseguir responder antes de ROUTE_TIMEOUT_MS estourar
+const MARGEM_RESPOSTA_MS = 20_000;
+// Abaixo disso não cabe nem a tentativa mais rápida; melhor responder do que começar e ser cortado
+const TENTATIVA_MINIMA_MS = 35_000;
+
+const URL_CONSULTA = 'https://satsp.fazenda.sp.gov.br/COMSAT/Public/ConsultaPublica/ConsultaPublicaCfe.aspx';
+// Discriminadores medidos em produção: a tabela de itens só existe no cupom, enquanto a página
+// devolvida na recusa mantém o campo da chave e a mensagem de captcha inválido.
+const SELETOR_RESULTADO = '#tableItens';
+const MSG_CAPTCHA_RECUSADO = 'O texto digitado não confere';
 //🔒 número máximo de consultas simultâneas (evita retries gastarem captcha duplicado).
 // Cada Chromium consome ~300-500MB: subir isso exige conferir a memória da instância.
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT) || 2;
@@ -28,15 +41,94 @@ function withTimeout(promise, ms, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// Uma tentativa completa: contexto limpo, token novo, submit e verificação do resultado.
+// O sucesso é aferido pelo conteúdo, não pelo status: quando a SEFAZ recusa o captcha ela
+// responde 200 devolvendo a própria página de consulta.
+// Devolve { ok: true, notaHtml } ou { ok: false, motivo }.
+async function tentarConsulta(browser, chaveAcesso, msRestantes) {
+  // O captcha não pode consumir todo o tempo restante: ainda é preciso submeter e extrair
+  const limiteCaptcha = Math.max(15_000, Math.min(CAPTCHA_TIMEOUT_MS, msRestantes - 30_000));
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  try {
+    await page.goto(URL_CONSULTA, { timeout: 30_000, waitUntil: 'domcontentloaded' });
+
+    // (opcional, mas mantido caso o ASP.NET valide)
+    await page.$eval('#__VIEWSTATE', el => el.value);
+    await page.$eval('#__EVENTVALIDATION', el => el.value);
+
+    await page.fill('#conteudo_txtChaveAcesso', chaveAcesso);
+
+    const captchaToken = await withTimeout(
+      resolverRecaptcha(),
+      limiteCaptcha,
+      'Tempo excedido ao resolver o reCAPTCHA.'
+    );
+
+    // Se o campo do reCAPTCHA não existir, o submit iria sem token e a recusa viria
+    // silenciosamente — melhor reportar como falha e deixar a retentativa cuidar.
+    const tokenAplicado = await page.evaluate((token) => {
+      const el = document.querySelector('[name="g-recaptcha-response"]');
+      if (!el) return false;
+      el.value = token;
+      return true;
+    }, captchaToken);
+    if (!tokenAplicado) return { ok: false, motivo: 'campo g-recaptcha-response ausente na página' };
+
+    // Garante botão habilitado
+    await page.evaluate(() => {
+      const btn = document.querySelector('#conteudo_btnConsultar');
+      if (btn) btn.disabled = false;
+    });
+
+    await page.click('#conteudo_btnConsultar');
+
+    // A recusa aparece quase imediatamente. Esperar só pelo seletor do cupom desperdiçaria os
+    // 25s inteiros em toda tentativa recusada, então os dois desfechos são observados juntos.
+    const desfecho = await page
+      .waitForFunction(
+        ({ seletor, msg }) => {
+          if (document.querySelector(seletor)) return 'cupom';
+          if (document.body?.innerHTML?.includes(msg)) return 'recusa';
+          return false;
+        },
+        { seletor: SELETOR_RESULTADO, msg: MSG_CAPTCHA_RECUSADO },
+        { timeout: 25_000 }
+      )
+      .then((handle) => handle.jsonValue())
+      .catch(() => 'timeout');
+
+    if (desfecho !== 'cupom') {
+      return {
+        ok: false,
+        motivo: desfecho === 'recusa' ? 'SEFAZ recusou o captcha' : 'cupom não apareceu após o submit'
+      };
+    }
+
+    // Extrai somente a div da nota para exibição + performance
+    let notaHtml;
+    try {
+      notaHtml = await page.$eval('#conteudo', el => el.outerHTML);
+    } catch {
+      // fallback: retorna a página inteira
+      notaHtml = await page.content();
+    }
+    return { ok: true, notaHtml };
+  } finally {
+    try { await context.close(); } catch {}
+  }
+}
+
 app.post('/consulta', async (req, res) => {
   if (emAndamento >= MAX_CONCURRENT) {
     return res.status(429).json({ error: 'Já existe uma consulta em andamento. Tente novamente em instantes.' });
   }
   emAndamento++;
 
+  const inicio = Date.now();
   let respondido = false;
   let browser;
-  let page;
   let abortado = false;
   let slotLiberado = false;
 
@@ -83,67 +175,48 @@ app.post('/consulta', async (req, res) => {
       headless: process.env.HEADLESS !== 'false',
       args: ['--no-sandbox','--disable-dev-shm-usage']
     });
-    page = await browser.newPage();
 
-    // 1) Abre página e já começa a preparar o formulário
-    await page.goto('https://satsp.fazenda.sp.gov.br/COMSAT/Public/ConsultaPublica/ConsultaPublicaCfe.aspx', {
-      timeout: 30_000,
-      waitUntil: 'domcontentloaded'
-    });
+    let notaHtml = null;
+    let ultimoMotivo = 'não foi possível obter o cupom';
 
-    // (opcional, mas mantido caso o ASP.NET valide)
-    await page.$eval('#__VIEWSTATE', el => el.value);
-    await page.$eval('#__EVENTVALIDATION', el => el.value);
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS && !abortado; tentativa++) {
+      const restante = ROUTE_TIMEOUT_MS - MARGEM_RESPOSTA_MS - (Date.now() - inicio);
+      if (restante < TENTATIVA_MINIMA_MS) {
+        console.warn('⏳ Tempo insuficiente para nova tentativa; respondendo com o que há.');
+        break;
+      }
 
-    await page.fill('#conteudo_txtChaveAcesso', chaveAcesso);
-
-    // 2) Dispara a resolução do captcha em paralelo (overlap)
-    const captchaPromise = resolverRecaptcha();
-
-    // 3) Quando realmente precisar, aguarda o token (com limite máximo)
-    const captchaToken = await withTimeout(
-      captchaPromise,
-      CAPTCHA_TIMEOUT_MS,
-      'Tempo excedido ao resolver o reCAPTCHA.'
-    );
-
-    await page.evaluate((token) => {
-      const el = document.querySelector('[name="g-recaptcha-response"]');
-      if (el) el.value = token;
-    }, captchaToken);
-
-    // Garante botão habilitado
-    await page.evaluate(() => {
-      const btn = document.querySelector('#conteudo_btnConsultar');
-      if (btn) btn.disabled = false;
-    });
-
-    await page.click('#conteudo_btnConsultar');
-
-    try {
-      await page.waitForSelector('text=CUPOM FISCAL ELETRÔNICO', { timeout: 20_000 });
-    } catch (waitError) {
-      // Diagnóstico: o site pode ter rejeitado o token, mostrado a chave como inválida,
-      // ou apresentado um bloqueio — loga o que realmente foi renderizado para investigar depois.
+      let resultado;
       try {
-        const textoPagina = await page.evaluate(() => document.body?.innerText?.slice(0, 1000));
-        console.error('❌ Cupom não encontrado após submit. Conteúdo da página:', textoPagina);
-      } catch {}
-      throw waitError;
+        resultado = await tentarConsulta(browser, chaveAcesso, restante);
+      } catch (erroTentativa) {
+        // Falha isolada (captcha lento, navegação que caiu): não pode derrubar as demais tentativas
+        if (abortado) break;
+        resultado = { ok: false, motivo: erroTentativa.message };
+      }
+
+      if (resultado.ok) {
+        notaHtml = resultado.notaHtml;
+        console.log(`✅ Cupom obtido na tentativa ${tentativa}/${MAX_TENTATIVAS}.`);
+        break;
+      }
+
+      ultimoMotivo = resultado.motivo;
+      console.warn(`↻ Tentativa ${tentativa}/${MAX_TENTATIVAS} falhou: ${resultado.motivo}`);
     }
 
-    // 5) Extrai somente a div da nota para exibição + performance
-    let notaHtml;
-    try {
-      notaHtml = await page.$eval('#conteudo', el => el.outerHTML);
-    } catch {
-      // fallback: retorna a página inteira
-      notaHtml = await page.content();
-    }
-
-    if (!respondido) {
+    if (!abortado && !respondido) {
       respondido = true;
-      res.json({ status: 'ok', notaHtml });
+      if (notaHtml) {
+        res.json({ status: 'ok', notaHtml });
+      } else {
+        // 503 e não 200: a recusa da SEFAZ é falha temporária, e devolver a página de consulta
+        // como se fosse o cupom era justamente o que enganava o frontend.
+        console.error(`❌ Todas as tentativas falharam. Último motivo: ${ultimoMotivo}`);
+        res.status(503).json({
+          error: 'A SEFAZ recusou a consulta nas tentativas realizadas. Tente novamente em instantes.'
+        });
+      }
     }
   } catch (error) {
     // Quando abortamos de propósito, o Playwright rejeita por browser fechado: não é falha real
@@ -158,7 +231,6 @@ app.post('/consulta', async (req, res) => {
     }
   } finally {
     liberarSlot();
-    try { if (page) await page.close(); } catch {}
     try { if (browser) await browser.close(); } catch {}
   }
 });
