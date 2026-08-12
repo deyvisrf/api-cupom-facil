@@ -8,19 +8,22 @@ app.use(express.json());
 app.use(cors());
 
 // ⏱️ Orçamento de tempo, do mais interno para o mais externo:
-//   captcha (120s) + carregamento da página (~10s) + submit/extração (~20s) = ~150s < rota (160s) < frontend (180s)
+//   goto (até 30s) + captcha (até 100s) + submit/extração (até 25s) = 155s < rota (170s) < frontend (180s)
 // Cada camada precisa de folga sobre a de dentro, senão o erro que chega ao usuário é o genérico
 // da camada externa em vez da causa real.
-const ROUTE_TIMEOUT_MS = 160_000;
+const ROUTE_TIMEOUT_MS = 170_000;
 //⏱️ limite de espera pela resolução do captcha (a lib do Anti-Captcha não tem timeout interno).
-// Medido em produção: token que demora costuma vir de worker degradado e ser recusado pela SEFAZ,
-// enquanto token rápido quase sempre passa. Cortar em 30s e pedir outro venceu 4/4 contra 1/4.
-const CAPTCHA_TIMEOUT_MS = Number(process.env.CAPTCHA_TIMEOUT_MS) || 30_000;
+// O corte de 30s que existia aqui vinha da leitura de que token lento é token ruim. Era correlação:
+// medido em A/B, os três solves enterprise levaram 44s, 58s e 156s e os três foram aceitos, enquanto
+// os clássicos rápidos foram recusados 2 de 3 vezes. Quem prevê a recusa é o task type, não o tempo —
+// e com 30s nenhum solve enterprise chegaria a ser usado.
+const CAPTCHA_TIMEOUT_MS = Number(process.env.CAPTCHA_TIMEOUT_MS) || 100_000;
 //🔁 A SEFAZ recusa o token com frequência e, ao recusar, devolve a própria página de consulta
-// com HTTP 200. Ciclar tokens é o que sustenta a taxa de sucesso.
-const MAX_TENTATIVAS = Number(process.env.MAX_TENTATIVAS) || 5;
+// com HTTP 200. Com o task type certo a recusa ficou rara, então poucas tentativas longas rendem
+// mais que muitas curtas — e a solve que estoura o limite não é perdida, continua para a seguinte.
+const MAX_TENTATIVAS = Number(process.env.MAX_TENTATIVAS) || 2;
 // Folga reservada para conseguir responder antes de ROUTE_TIMEOUT_MS estourar
-const MARGEM_RESPOSTA_MS = 20_000;
+const MARGEM_RESPOSTA_MS = 15_000;
 // Abaixo disso não cabe nem a tentativa mais rápida; melhor responder do que começar e ser cortado
 const TENTATIVA_MINIMA_MS = 25_000;
 

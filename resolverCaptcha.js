@@ -28,7 +28,12 @@ async function resolverRecaptcha() {
     }
     
     console.log('⏳ Iniciando resolução do reCAPTCHA...');
-    const solution = await anticaptcha.solveRecaptchaV2Proxyless(websiteURL, siteKey);
+    // A chave da SEFAZ é registrada no reCAPTCHA Enterprise — o próprio widget avisa que o site
+    // "está excedendo a cota gratuita do reCAPTCHA Enterprise". Com Enterprise o Google devolve um
+    // score de risco em vez de um sim/não, e o token do task type clássico reprovava nesse score:
+    // chegava íntegro no POST (verificado byte a byte) e mesmo assim virava "O texto digitado não
+    // confere". A/B submetendo à SEFAZ de verdade: clássico 1/3, enterprise 3/3.
+    const solution = await anticaptcha.solveRecaptchaV2EnterpriseProxyless(websiteURL, siteKey);
     
     console.log('📦 Resposta completa do Anti-Captcha:', JSON.stringify(solution, null, 2));
     
