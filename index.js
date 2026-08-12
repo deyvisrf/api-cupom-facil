@@ -42,86 +42,129 @@ function withTimeout(promise, ms, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// Uma tentativa completa: contexto limpo, token novo, submit e verificação do resultado.
+// O corte por tempo do captcha é um Promise.race: ele desiste de esperar, mas a solve continua
+// rodando no Anti-Captcha e é cobrada do mesmo jeito. Medido localmente: das 5 tasks de uma
+// consulta, 5 foram resolvidas e pagas e só 2 chegaram a ser submetidas — as outras 3 chegaram
+// depois do corte e foram para o lixo, enquanto a tentativa seguinte abria task nova do zero.
+// Guardar a solve pendente faz a próxima tentativa aproveitar o token já pago.
+function criarFonteDeToken() {
+  let pendente = null;
+
+  return (limiteMs) => {
+    if (!pendente) {
+      pendente = resolverRecaptcha();
+      // Solve que falha de vez não pode ficar grudada envenenando as tentativas seguintes
+      pendente.catch(() => { pendente = null; });
+    }
+    const emCurso = pendente;
+    return withTimeout(emCurso, limiteMs, 'Tempo excedido ao resolver o reCAPTCHA.')
+      .then((token) => {
+        // Token entregue é token consumido; só o abandonado por timeout continua guardado
+        if (pendente === emCurso) pendente = null;
+        return token;
+      });
+  };
+}
+
+// Deixa a página pronta para submeter: na primeira tentativa é preciso navegar, mas depois de uma
+// recusa a SEFAZ devolve o próprio formulário — reaproveitar a página pula o goto, que na rede do
+// Railway chega a estourar os 30s e sozinho inviabiliza a tentativa seguinte.
+async function prepararPagina(page, chaveAcesso) {
+  const jaCarregada = page.url().startsWith(URL_CONSULTA);
+  if (!jaCarregada) {
+    await page.goto(URL_CONSULTA, { timeout: 30_000, waitUntil: 'domcontentloaded' });
+  }
+
+  // O api.js do reCAPTCHA é async/defer: o textarea do token só existe depois do grecaptcha.render(),
+  // tanto no primeiro carregamento quanto no re-render que vem junto com a página de recusa.
+  try {
+    await page.waitForSelector('[name="g-recaptcha-response"]', { state: 'attached', timeout: 15_000 });
+  } catch (erro) {
+    // Página reaproveitada em estado inesperado: recarrega uma vez antes de desistir
+    if (!jaCarregada) throw erro;
+    await page.goto(URL_CONSULTA, { timeout: 30_000, waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('[name="g-recaptcha-response"]', { state: 'attached', timeout: 15_000 });
+  }
+
+  // (opcional, mas mantido caso o ASP.NET valide)
+  await page.$eval('#__VIEWSTATE', el => el.value);
+  await page.$eval('#__EVENTVALIDATION', el => el.value);
+
+  await page.fill('#conteudo_txtChaveAcesso', chaveAcesso);
+}
+
+// Uma tentativa completa: token novo, submit e verificação do resultado.
 // O sucesso é aferido pelo conteúdo, não pelo status: quando a SEFAZ recusa o captcha ela
 // responde 200 devolvendo a própria página de consulta.
 // Devolve { ok: true, notaHtml } ou { ok: false, motivo }.
-async function tentarConsulta(browser, chaveAcesso, msRestantes) {
+async function tentarConsulta(page, chaveAcesso, obterToken, msRestantes) {
   // O captcha não pode consumir todo o tempo restante: ainda é preciso submeter e extrair
   const limiteCaptcha = Math.max(15_000, Math.min(CAPTCHA_TIMEOUT_MS, msRestantes - 30_000));
-  const context = await browser.newContext();
-  const page = await context.newPage();
 
-  try {
-    await page.goto(URL_CONSULTA, { timeout: 30_000, waitUntil: 'domcontentloaded' });
+  await prepararPagina(page, chaveAcesso);
 
-    // (opcional, mas mantido caso o ASP.NET valide)
-    await page.$eval('#__VIEWSTATE', el => el.value);
-    await page.$eval('#__EVENTVALIDATION', el => el.value);
+  const captchaToken = await obterToken(limiteCaptcha);
 
-    await page.fill('#conteudo_txtChaveAcesso', chaveAcesso);
-
-    const captchaToken = await withTimeout(
-      resolverRecaptcha(),
-      limiteCaptcha,
-      'Tempo excedido ao resolver o reCAPTCHA.'
-    );
-
-    // Se o campo do reCAPTCHA não existir, o submit iria sem token e a recusa viria
-    // silenciosamente — melhor reportar como falha e deixar a retentativa cuidar.
-    const tokenAplicado = await page.evaluate((token) => {
+  // Se o campo do reCAPTCHA não existir, o submit iria sem token e a recusa viria
+  // silenciosamente — melhor reportar como falha e deixar a retentativa cuidar.
+  const tokenAplicado = await page.evaluate((token) => {
       const el = document.querySelector('[name="g-recaptcha-response"]');
       if (!el) return false;
       el.value = token;
-      return true;
-    }, captchaToken);
-    if (!tokenAplicado) return { ok: false, motivo: 'campo g-recaptcha-response ausente na página' };
+    return true;
+  }, captchaToken);
+  if (!tokenAplicado) return { ok: false, motivo: 'campo g-recaptcha-response ausente na página' };
 
-    // Garante botão habilitado
-    await page.evaluate(() => {
-      const btn = document.querySelector('#conteudo_btnConsultar');
-      if (btn) btn.disabled = false;
-    });
+  // Garante botão habilitado
+  await page.evaluate(() => {
+    const btn = document.querySelector('#conteudo_btnConsultar');
+    if (btn) btn.disabled = false;
+  });
 
-    await page.click('#conteudo_btnConsultar');
+  await page.click('#conteudo_btnConsultar');
 
-    // A recusa aparece quase imediatamente. Esperar só pelo seletor do cupom desperdiçaria os
-    // 25s inteiros em toda tentativa recusada, então os dois desfechos são observados juntos.
-    const desfecho = await page
-      .waitForFunction(
-        ({ seletor, msg }) => {
-          if (document.querySelector(seletor)) return 'cupom';
-          if (document.body?.innerHTML?.includes(msg)) return 'recusa';
-          return false;
-        },
-        { seletor: SELETOR_RESULTADO, msg: MSG_CAPTCHA_RECUSADO },
-        { timeout: 25_000 }
-      )
-      .then((handle) => handle.jsonValue())
-      .catch(() => 'timeout');
+  // A recusa aparece quase imediatamente. Esperar só pelo seletor do cupom desperdiçaria os
+  // 25s inteiros em toda tentativa recusada, então os dois desfechos são observados juntos.
+  const desfecho = await page
+    .waitForFunction(
+      ({ seletor, msg }) => {
+        if (document.querySelector(seletor)) return 'cupom';
+        if (document.body?.innerHTML?.includes(msg)) return 'recusa';
+        return false;
+      },
+      { seletor: SELETOR_RESULTADO, msg: MSG_CAPTCHA_RECUSADO },
+      { timeout: 25_000 }
+    )
+    .then((handle) => handle.jsonValue())
+    .catch(() => 'timeout');
 
-    if (desfecho !== 'cupom') {
-      return {
-        ok: false,
-        motivo: desfecho === 'recusa' ? 'SEFAZ recusou o captcha' : 'cupom não apareceu após o submit'
-      };
-    }
-
-    // Extrai somente a div da nota para exibição + performance
-    let notaHtml;
-    try {
-      notaHtml = await page.$eval('#conteudo', el => el.outerHTML);
-    } catch {
-      // fallback: retorna a página inteira
-      notaHtml = await page.content();
-    }
-    return { ok: true, notaHtml };
-  } finally {
-    try { await context.close(); } catch {}
+  if (desfecho !== 'cupom') {
+    return {
+      ok: false,
+      motivo: desfecho === 'recusa' ? 'SEFAZ recusou o captcha' : 'cupom não apareceu após o submit'
+    };
   }
+
+  // Extrai somente a div da nota para exibição + performance
+  let notaHtml;
+  try {
+    notaHtml = await page.$eval('#conteudo', el => el.outerHTML);
+  } catch {
+    // fallback: retorna a página inteira
+    notaHtml = await page.content();
+  }
+  return { ok: true, notaHtml };
 }
 
 app.post('/consulta', async (req, res) => {
+  // O frontend manda a chave formatada ("3523 0419 ..."), então normaliza antes de conferir.
+  // Sem essa checagem um corpo sem chave queimava as 5 tentativas — navegador, captcha pago e
+  // tudo — só para falhar no page.fill e responder 503 em vez de 400.
+  const chaveAcesso = String(req.body?.chaveAcesso ?? '').replace(/\D/g, '');
+  if (chaveAcesso.length !== 44) {
+    return res.status(400).json({ error: 'Chave de acesso inválida: informe os 44 dígitos.' });
+  }
+
   if (emAndamento >= MAX_CONCURRENT) {
     return res.status(429).json({ error: 'Já existe uma consulta em andamento. Tente novamente em instantes.' });
   }
@@ -168,14 +211,18 @@ app.post('/consulta', async (req, res) => {
     abortarConsulta('cliente desconectou');
   });
 
-  const { chaveAcesso } = req.body;
-
   try {
     // 🚀 Produção: headless + no-sandbox. HEADLESS=false abre o navegador para depuração local.
     browser = await chromium.launch({
       headless: process.env.HEADLESS !== 'false',
       args: ['--no-sandbox','--disable-dev-shm-usage']
     });
+
+    // Contexto e página vivem a consulta inteira: é o que permite reaproveitar a página depois de
+    // uma recusa. A limpeza vem do browser.close() no finally.
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const obterToken = criarFonteDeToken();
 
     let notaHtml = null;
     let ultimoMotivo = 'não foi possível obter o cupom';
@@ -189,7 +236,7 @@ app.post('/consulta', async (req, res) => {
 
       let resultado;
       try {
-        resultado = await tentarConsulta(browser, chaveAcesso, restante);
+        resultado = await tentarConsulta(page, chaveAcesso, obterToken, restante);
       } catch (erroTentativa) {
         // Falha isolada (captcha lento, navegação que caiu): não pode derrubar as demais tentativas
         if (abortado) break;
